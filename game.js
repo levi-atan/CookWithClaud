@@ -1,16 +1,14 @@
 // --- Constants ---
-const CANVAS_W    = 800;
-const CANVAS_H    = 600;
-const ROOM_W      = 1200;
-const ROOM_H      = 900;
-const WALL_T      = 32;
-const PLAYER_W    = 24;
-const PLAYER_H    = 24;
+const CANVAS_W     = 800;
+const CANVAS_H     = 600;
+const WALL_T       = 32;
+const PLAYER_W     = 24;
+const PLAYER_H     = 24;
 const PLAYER_SPEED = 3;
-const ITEM_W      = 20;
-const ITEM_H      = 20;
+const ITEM_W       = 20;
+const ITEM_H       = 20;
 const PICKUP_RADIUS = 40;
-const DOOR_WIDTH  = 60;
+const DOOR_WIDTH   = 60;
 
 // --- Canvas setup ---
 const canvas = document.getElementById('gameCanvas');
@@ -18,13 +16,11 @@ const ctx    = canvas.getContext('2d');
 canvas.width  = CANVAS_W;
 canvas.height = CANVAS_H;
 
-// --- World dimensions ---
-const WORLD_W = ROOM_W + WALL_T * 2;
-const WORLD_H = ROOM_H + WALL_T * 2;
-
 // --- Game state ---
 const keys = {};
-let eKeyDown = false; // edge-trigger tracker for E
+let eKeyDown    = false;
+let walkCycle   = 0;       // drives rotation + scale animation
+let playerFacing = 0;      // radians; last movement direction (0 = right)
 
 const camera = { x: 0, y: 0 };
 
@@ -36,45 +32,46 @@ const player = {
   color: '#4af'
 };
 
-const room = {
-  walls: [],
-  floorColor: '#2a2a2a',
-  wallColor:  '#555'
-};
+// Building 1: original (larger), Building 2: second (smaller)
+const buildings = [
+  { x: 150, y: 150, w: 500, h: 400, walls: [], floorColor: '#888', wallColor: '#666' },
+  { x: 780, y: 200, w: 300, h: 250, walls: [], floorColor: '#888', wallColor: '#555' },
+];
 
-const items = [];
+const allWalls = []; // flat list of every wall rect across all buildings
+const items    = [];
 
-// --- Room construction ---
-function buildRoom() {
-  const fullW   = WORLD_W;
-  const fullH   = WORLD_H;
-  const rightX  = WALL_T + ROOM_W;
-  const bottomY = WALL_T + ROOM_H;
+// --- Building construction ---
+function buildBuilding(b) {
+  const fullW   = b.w + WALL_T * 2;
+  const fullH   = b.h + WALL_T * 2;
+  const rightX  = b.x + WALL_T + b.w;
+  const bottomY = b.y + WALL_T + b.h;
+  const doorX   = b.x + WALL_T + b.w / 2 - DOOR_WIDTH / 2;
 
-  // Top wall — door centered horizontally
-  const topDoorX = WALL_T + ROOM_W / 2 - DOOR_WIDTH / 2;
-  room.walls.push({ x: 0,                      y: 0, w: topDoorX,                  h: WALL_T });
-  room.walls.push({ x: topDoorX + DOOR_WIDTH,  y: 0, w: fullW - topDoorX - DOOR_WIDTH, h: WALL_T });
+  // Top wall — door centered
+  b.walls.push({ x: b.x,                y: b.y,     w: doorX - b.x,                         h: WALL_T });
+  b.walls.push({ x: doorX + DOOR_WIDTH, y: b.y,     w: b.x + fullW - doorX - DOOR_WIDTH,    h: WALL_T });
 
-  // Bottom wall — door centered horizontally
-  room.walls.push({ x: 0,                      y: bottomY, w: topDoorX,                  h: WALL_T });
-  room.walls.push({ x: topDoorX + DOOR_WIDTH,  y: bottomY, w: fullW - topDoorX - DOOR_WIDTH, h: WALL_T });
+  // Bottom wall — door centered
+  b.walls.push({ x: b.x,                y: bottomY, w: doorX - b.x,                         h: WALL_T });
+  b.walls.push({ x: doorX + DOOR_WIDTH, y: bottomY, w: b.x + fullW - doorX - DOOR_WIDTH,    h: WALL_T });
 
-  // Left wall — full height, no door
-  room.walls.push({ x: 0,      y: 0, w: WALL_T, h: fullH });
+  // Left wall — full height
+  b.walls.push({ x: b.x,    y: b.y, w: WALL_T, h: fullH });
 
-  // Right wall — full height, no door
-  room.walls.push({ x: rightX, y: 0, w: WALL_T, h: fullH });
+  // Right wall — full height
+  b.walls.push({ x: rightX, y: b.y, w: WALL_T, h: fullH });
+
+  for (const w of b.walls) allWalls.push(w);
 }
 
-// --- Item spawning ---
+// --- Item spawning (absolute world coords) ---
 function spawnItems(defs) {
   for (const d of defs) {
     items.push({
-      x: WALL_T + d.x,
-      y: WALL_T + d.y,
-      w: ITEM_W,
-      h: ITEM_H,
+      x: d.x, y: d.y,
+      w: ITEM_W, h: ITEM_H,
       color: d.color,
       label: d.label,
       held: false
@@ -90,12 +87,10 @@ function aabbOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
          ay + ah > by;
 }
 
-// --- Camera update ---
+// --- Camera update (unclamped — open world) ---
 function updateCamera() {
   camera.x = player.x + player.w / 2 - CANVAS_W / 2;
   camera.y = player.y + player.h / 2 - CANVAS_H / 2;
-  camera.x = Math.max(0, Math.min(camera.x, WORLD_W - CANVAS_W));
-  camera.y = Math.max(0, Math.min(camera.y, WORLD_H - CANVAS_H));
 }
 
 // --- World to screen ---
@@ -114,7 +109,7 @@ function handleMovement() {
 
   // X axis
   player.x += dx;
-  for (const wall of room.walls) {
+  for (const wall of allWalls) {
     if (aabbOverlap(player.x, player.y, player.w, player.h,
                     wall.x, wall.y, wall.w, wall.h)) {
       if (dx > 0) player.x = wall.x - player.w;
@@ -124,17 +119,22 @@ function handleMovement() {
 
   // Y axis
   player.y += dy;
-  for (const wall of room.walls) {
+  for (const wall of allWalls) {
     if (aabbOverlap(player.x, player.y, player.w, player.h,
                     wall.x, wall.y, wall.w, wall.h)) {
       if (dy > 0) player.y = wall.y - player.h;
       if (dy < 0) player.y = wall.y + wall.h;
     }
   }
+  // No world clamp — player moves freely outside buildings
 
-  // Clamp to world bounds
-  player.x = Math.max(0, Math.min(player.x, WORLD_W - player.w));
-  player.y = Math.max(0, Math.min(player.y, WORLD_H - player.h));
+  // Walking animation state
+  if (dx !== 0 || dy !== 0) {
+    walkCycle += 0.15;
+    playerFacing = Math.atan2(dy, dx);
+  } else {
+    walkCycle *= 0.75; // damp smoothly to 0 when stopped
+  }
 }
 
 // --- Nearest item within pickup radius ---
@@ -157,7 +157,7 @@ function findNearestItem() {
   return closest;
 }
 
-// --- Interact: pickup or drop (edge-triggered from keydown) ---
+// --- Interact: pickup or drop (edge-triggered) ---
 function handleInteract() {
   if (player.heldItem !== null) {
     const item = player.heldItem;
@@ -176,14 +176,10 @@ function handleInteract() {
 
 // --- Input ---
 window.addEventListener('keydown', e => {
-  // Prevent arrow keys from scrolling the page
   if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) {
     e.preventDefault();
   }
-
   keys[e.code] = true;
-
-  // E key: edge-trigger (fire only on first press, not on repeat)
   if (e.code === 'KeyE' && !eKeyDown) {
     eKeyDown = true;
     handleInteract();
@@ -197,16 +193,20 @@ window.addEventListener('keyup', e => {
 
 // --- Rendering ---
 function drawFloor() {
-  const { sx, sy } = toScreen(WALL_T, WALL_T);
-  ctx.fillStyle = room.floorColor;
-  ctx.fillRect(sx, sy, ROOM_W, ROOM_H);
+  for (const b of buildings) {
+    const { sx, sy } = toScreen(b.x + WALL_T, b.y + WALL_T);
+    ctx.fillStyle = b.floorColor;
+    ctx.fillRect(sx, sy, b.w, b.h);
+  }
 }
 
 function drawWalls() {
-  ctx.fillStyle = room.wallColor;
-  for (const wall of room.walls) {
-    const { sx, sy } = toScreen(wall.x, wall.y);
-    ctx.fillRect(sx, sy, wall.w, wall.h);
+  for (const b of buildings) {
+    ctx.fillStyle = b.wallColor;
+    for (const wall of b.walls) {
+      const { sx, sy } = toScreen(wall.x, wall.y);
+      ctx.fillRect(sx, sy, wall.w, wall.h);
+    }
   }
 }
 
@@ -216,17 +216,14 @@ function drawItems(nearestItem) {
 
     const { sx, sy } = toScreen(item.x, item.y);
 
-    // Item body
     ctx.fillStyle = item.color;
     ctx.fillRect(sx, sy, item.w, item.h);
 
-    // Item label below
-    ctx.fillStyle = '#ccc';
+    ctx.fillStyle = '#222';
     ctx.font = '10px monospace';
     ctx.textAlign = 'center';
     ctx.fillText(item.label, sx + item.w / 2, sy + item.h + 12);
 
-    // Pickup hint above nearest item only
     if (item === nearestItem) {
       ctx.fillStyle = '#fff';
       ctx.font = '11px monospace';
@@ -237,33 +234,50 @@ function drawItems(nearestItem) {
 }
 
 function drawPlayer() {
-  const { sx, sy } = toScreen(player.x, player.y);
+  const cx = player.x + player.w / 2;
+  const cy = player.y + player.h / 2;
+  const { sx, sy } = toScreen(cx, cy);
+
+  // Walking animation: rock ±5° and pulse width slightly
+  const rotation = Math.sin(walkCycle) * (5 * Math.PI / 180);
+  const scaleX   = 1 + Math.sin(walkCycle * 2) * 0.10;
+
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(rotation);
+  ctx.scale(scaleX, 1);
 
   ctx.fillStyle = player.color;
-  ctx.fillRect(sx, sy, player.w, player.h);
+  ctx.fillRect(-player.w / 2, -player.h / 2, player.w, player.h);
 
   // Direction dot (top-center)
   ctx.fillStyle = '#fff';
-  ctx.fillRect(sx + player.w / 2 - 3, sy + 4, 6, 6);
+  ctx.fillRect(-3, -player.h / 2 + 4, 6, 6);
 
-  // Draw held item on top of player
+  ctx.restore();
+
+  // Held item orbits ahead of player in the facing direction
   if (player.heldItem !== null) {
+    const orbit = ITEM_H + 10;
+    const ox = Math.cos(playerFacing) * orbit;
+    const oy = Math.sin(playerFacing) * orbit;
+
+    ctx.save();
+    ctx.translate(sx + ox, sy + oy);
+    ctx.rotate(playerFacing);
     ctx.fillStyle = player.heldItem.color;
-    ctx.fillRect(sx + player.w / 2 - ITEM_W / 2, sy - ITEM_H - 2, ITEM_W, ITEM_H);
+    ctx.fillRect(-ITEM_W / 2, -ITEM_H / 2, ITEM_W, ITEM_H);
+    ctx.restore();
   }
 }
 
 function drawHUD() {
-  // Background box
   ctx.fillStyle = 'rgba(0,0,0,0.65)';
   ctx.fillRect(10, 10, 180, 44);
-
-  // Border
   ctx.strokeStyle = '#444';
   ctx.lineWidth = 1;
   ctx.strokeRect(10, 10, 180, 44);
 
-  ctx.fillStyle = '#fff';
   ctx.font = '13px monospace';
   ctx.textAlign = 'left';
 
@@ -277,18 +291,17 @@ function drawHUD() {
     ctx.fillText('Holding: nothing', 18, 34);
   }
 
-  // Controls hint bottom-right
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
   ctx.fillRect(CANVAS_W - 160, CANVAS_H - 36, 150, 26);
-  ctx.fillStyle = '#666';
+  ctx.fillStyle = '#ccc';
   ctx.font = '10px monospace';
   ctx.textAlign = 'left';
   ctx.fillText('Arrows/WASD: move  E: pick up', CANVAS_W - 155, CANVAS_H - 18);
 }
 
 function render() {
-  // Clear with dark background (wall exterior color)
-  ctx.fillStyle = '#111';
+  // Brown exterior ground
+  ctx.fillStyle = '#8B6914';
   ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
   drawFloor();
@@ -313,18 +326,22 @@ function gameLoop() {
 }
 
 // --- Init ---
-buildRoom();
+buildings.forEach(buildBuilding);
 
 spawnItems([
-  { x: 300, y: 300, label: 'Key',  color: '#fa4' },
-  { x: 800, y: 200, label: 'Gem',  color: '#4fa' },
-  { x: 200, y: 600, label: 'Coin', color: '#ff4' },
-  { x: 900, y: 650, label: 'Map',  color: '#f4a' },
+  // Building 1 interior (starts at world 182, 182)
+  { x: 280, y: 280, label: 'Key',  color: '#fa4' },
+  { x: 460, y: 340, label: 'Gem',  color: '#4fa' },
+  { x: 360, y: 460, label: 'Coin', color: '#ff4' },
+  // Building 2 interior (starts at world 812, 232)
+  { x: 880, y: 310, label: 'Map',  color: '#f4a' },
+  { x: 980, y: 390, label: 'Orb',  color: '#a4f' },
 ]);
 
-// Place player in room center
-player.x = WALL_T + ROOM_W / 2 - player.w / 2;
-player.y = WALL_T + ROOM_H / 2 - player.h / 2;
+// Place player in center of building 1
+const b1 = buildings[0];
+player.x = b1.x + WALL_T + b1.w / 2 - player.w / 2;
+player.y = b1.y + WALL_T + b1.h / 2 - player.h / 2;
 
 updateCamera();
 requestAnimationFrame(gameLoop);
